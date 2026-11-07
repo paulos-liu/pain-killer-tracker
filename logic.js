@@ -20,8 +20,7 @@
       intervalHours: 6,
       asNeeded: true,
       maxPer24hMg: 1200,
-      blurb:
-        "Common US adult over-the-counter label: 200 mg every 4–6 hours, and no more than 1,200 mg (6 tablets) in 24 hours unless a clinician directs otherwise. This preset uses a 6 hour interval. Change any number to match the bottle."
+      parts: [{ ingredientName: "Ibuprofen", mgPerUnit: 200, maxPer24hMg: 1200 }]
     },
     {
       id: "acetaminophen-es",
@@ -32,8 +31,7 @@
       intervalHours: 6,
       asNeeded: true,
       maxPer24hMg: 3000,
-      blurb:
-        "Common US Extra Strength label: 1,000 mg every 6 hours, and no more than 3,000 mg (6 caplets of 500 mg) in 24 hours. Some labels allow 4,000 mg. Every product that contains acetaminophen has to count toward the same max."
+      parts: [{ ingredientName: "Acetaminophen", mgPerUnit: 1000, maxPer24hMg: 3000 }]
     },
     {
       id: "acetaminophen-regular",
@@ -44,13 +42,26 @@
       intervalHours: 6,
       asNeeded: true,
       maxPer24hMg: 3250,
-      blurb:
-        "Common US regular-strength label: 650 mg every 4–6 hours, and no more than 3,250 mg (10 tablets of 325 mg) in 24 hours. This preset uses a 6 hour interval. Every product that contains acetaminophen has to count toward the same max."
+      parts: [{ ingredientName: "Acetaminophen", mgPerUnit: 650, maxPer24hMg: 3250 }]
+    },
+    {
+      id: "percocet",
+      medicineName: "Percocet",
+      ingredientName: "Oxycodone",
+      usualDoseMg: 5,
+      doseWords: "1 tablet",
+      intervalHours: 6,
+      asNeeded: true,
+      maxPer24hMg: null,
+      parts: [
+        { ingredientName: "Oxycodone", mgPerUnit: 5, maxPer24hMg: null },
+        { ingredientName: "Acetaminophen", mgPerUnit: 325, maxPer24hMg: 3000 }
+      ]
     }
   ];
 
   function emptyState() {
-    return { version: 1, ingredients: [], medicines: [], doses: [] };
+    return { version: 2, ingredients: [], medicines: [], doses: [] };
   }
 
   function cleanText(value, max) {
@@ -77,6 +88,7 @@
       typeof data === "object" &&
       !Array.isArray(data) &&
       (data.version === 1 ||
+        data.version === 2 ||
         Array.isArray(data.medicines) ||
         Array.isArray(data.doses) ||
         Array.isArray(data.ingredients))
@@ -99,10 +111,8 @@
     for (const raw of Array.isArray(data.medicines) ? data.medicines : []) {
       if (!raw || typeof raw.id !== "string" || !raw.id || raw.id.length > 80 || seenMed.has(raw.id)) continue;
       const name = cleanText(raw.name, 80);
-      if (!name || !seenIng.has(raw.ingredientId)) continue;
-      let usual = Number(raw.usualDoseMg);
-      if (!Number.isFinite(usual) || usual < 0) usual = 0;
-      if (usual > 20000) usual = 20000;
+      const parts = cleanMedicineParts(raw, seenIng);
+      if (!name || !parts.length) continue;
       let interval = Number(raw.intervalHours);
       if (!Number.isFinite(interval) || interval < 0) interval = 0;
       if (interval > 72) interval = 72;
@@ -110,8 +120,9 @@
       medicines.push({
         id: raw.id,
         name,
-        ingredientId: raw.ingredientId,
-        usualDoseMg: usual,
+        parts,
+        ingredientId: parts[0].ingredientId,
+        usualDoseMg: parts[0].mgPerUnit,
         doseWords: cleanText(raw.doseWords, 80),
         intervalHours: interval,
         asNeeded: raw.asNeeded !== false,
@@ -131,18 +142,21 @@
         dropped += 1;
         continue;
       }
-      const amount = Number(raw.amountMg);
+      const medicine = medicines.find((item) => item.id === raw.medicineId);
+      const parts = cleanDoseParts(raw, medicine, seenIng);
       const taken = new Date(raw.takenAt);
-      if (!(amount > 0) || amount > 20000 || Number.isNaN(taken.getTime())) {
+      if (!parts.length || Number.isNaN(taken.getTime())) {
         dropped += 1;
         continue;
       }
+      const amountMg = roundMg(parts.reduce((sum, part) => sum + part.amountMg, 0));
       seenDose.add(raw.id);
       doses.push({
         id: raw.id,
         medicineId: raw.medicineId,
         takenAt: taken.toISOString(),
-        amountMg: amount,
+        amountMg,
+        parts,
         doseWords: cleanText(raw.doseWords, 80),
         painBefore: cleanPain(raw.painBefore),
         painAfter: cleanPain(raw.painAfter),
@@ -160,38 +174,107 @@
     return {
       recognized: true,
       dropped: dropped + trimmed,
-      state: { version: 1, ingredients, medicines, doses }
+      state: { version: 2, ingredients, medicines, doses }
     };
+  }
+
+  function roundMg(n) {
+    return Math.round(n * 100) / 100;
+  }
+
+  function cleanMedicineParts(raw, seenIng) {
+    const parts = [];
+    const seen = new Set();
+    if (Array.isArray(raw.parts)) {
+      for (const part of raw.parts) {
+        if (!part || typeof part.ingredientId !== "string" || !seenIng.has(part.ingredientId) || seen.has(part.ingredientId)) continue;
+        let mg = Number(part.mgPerUnit);
+        if (!Number.isFinite(mg) || mg < 0) mg = 0;
+        if (mg > 20000) mg = 20000;
+        seen.add(part.ingredientId);
+        parts.push({ ingredientId: part.ingredientId, mgPerUnit: mg });
+        if (parts.length >= 8) break;
+      }
+    }
+    if (!parts.length && typeof raw.ingredientId === "string" && seenIng.has(raw.ingredientId)) {
+      let usual = Number(raw.usualDoseMg);
+      if (!Number.isFinite(usual) || usual < 0) usual = 0;
+      if (usual > 20000) usual = 20000;
+      parts.push({ ingredientId: raw.ingredientId, mgPerUnit: usual });
+    }
+    return parts;
+  }
+
+  function cleanDoseParts(raw, medicine, seenIng) {
+    const parts = [];
+    const seen = new Set();
+    if (Array.isArray(raw.parts)) {
+      for (const part of raw.parts) {
+        if (!part || typeof part.ingredientId !== "string" || !seenIng.has(part.ingredientId) || seen.has(part.ingredientId)) continue;
+        const amount = Number(part.amountMg);
+        if (!(amount > 0) || amount > 20000) continue;
+        seen.add(part.ingredientId);
+        parts.push({ ingredientId: part.ingredientId, amountMg: amount });
+        if (parts.length >= 8) break;
+      }
+    }
+    if (parts.length) return parts;
+    const amount = Number(raw.amountMg);
+    const ingredientId = medicine && seenIng.has(medicine.ingredientId) ? medicine.ingredientId : "";
+    if (ingredientId && amount > 0 && amount <= 20000) {
+      return [{ ingredientId, amountMg: amount }];
+    }
+    return [];
   }
 
   function serialize(state) {
     return {
-      version: 1,
+      version: 2,
       ingredients: state.ingredients.map((item) => ({
         id: item.id,
         name: item.name,
         maxPer24hMg: item.maxPer24hMg
       })),
-      medicines: state.medicines.map((item) => ({
-        id: item.id,
-        name: item.name,
-        ingredientId: item.ingredientId,
-        usualDoseMg: item.usualDoseMg,
-        doseWords: item.doseWords,
-        intervalHours: item.intervalHours,
-        asNeeded: item.asNeeded,
-        active: item.active
-      })),
-      doses: state.doses.map((item) => ({
-        id: item.id,
-        medicineId: item.medicineId,
-        takenAt: item.takenAt,
-        amountMg: item.amountMg,
-        doseWords: item.doseWords,
-        painBefore: item.painBefore,
-        painAfter: item.painAfter,
-        note: item.note
-      }))
+      medicines: state.medicines.map((item) => {
+        const parts = medicineParts(item);
+        return {
+          id: item.id,
+          name: item.name,
+          ingredientId: parts[0] ? parts[0].ingredientId : item.ingredientId,
+          usualDoseMg: parts[0] ? parts[0].mgPerUnit : item.usualDoseMg,
+          parts: parts.map((part) => ({
+            ingredientId: part.ingredientId,
+            mgPerUnit: part.mgPerUnit
+          })),
+          doseWords: item.doseWords,
+          intervalHours: item.intervalHours,
+          asNeeded: item.asNeeded,
+          active: item.active
+        };
+      }),
+      doses: state.doses.map((item) => {
+        const medicine = state.medicines.find((med) => med.id === item.medicineId);
+        const parts =
+          Array.isArray(item.parts) && item.parts.length
+            ? item.parts
+            : medicine && medicine.ingredientId
+              ? [{ ingredientId: medicine.ingredientId, amountMg: item.amountMg }]
+              : [];
+        return {
+          id: item.id,
+          medicineId: item.medicineId,
+          takenAt: item.takenAt,
+          amountMg: item.amountMg,
+          parts: parts.map((part) => ({
+            ingredientId: part.ingredientId,
+            amountMg: part.amountMg
+          })),
+          doseWords: item.doseWords,
+          painBefore: item.painBefore,
+          painAfter: item.painAfter,
+          note: item.note
+        };
+      })
     };
   }
 
@@ -253,15 +336,43 @@
     return cleanText(value, 80).toLowerCase().replace(/\s+/g, " ");
   }
 
+  function medicineParts(medicine) {
+    if (medicine && Array.isArray(medicine.parts) && medicine.parts.length) {
+      return medicine.parts
+        .filter((part) => part && part.ingredientId)
+        .map((part) => ({
+          ingredientId: part.ingredientId,
+          mgPerUnit: Number(part.mgPerUnit) || 0
+        }));
+    }
+    if (medicine && medicine.ingredientId) {
+      return [{ ingredientId: medicine.ingredientId, mgPerUnit: Number(medicine.usualDoseMg) || 0 }];
+    }
+    return [];
+  }
+
+  function doseIngredientMg(state, dose, ingredientId) {
+    if (Array.isArray(dose.parts) && dose.parts.length) {
+      let sum = 0;
+      for (const part of dose.parts) {
+        if (part && part.ingredientId === ingredientId && Number(part.amountMg) > 0) sum += Number(part.amountMg);
+      }
+      return sum;
+    }
+    const medicine = state.medicines.find((item) => item.id === dose.medicineId);
+    if (!medicine || medicine.ingredientId !== ingredientId) return 0;
+    return Number(dose.amountMg) > 0 ? Number(dose.amountMg) : 0;
+  }
+
   function ingredientEvents(state, ingredientId, excludeDoseId) {
     const events = [];
     for (const dose of state.doses) {
       if (dose.id === excludeDoseId) continue;
-      const medicine = state.medicines.find((item) => item.id === dose.medicineId);
-      if (!medicine || medicine.ingredientId !== ingredientId) continue;
+      const mg = doseIngredientMg(state, dose, ingredientId);
+      if (!(mg > 0)) continue;
       const t = new Date(dose.takenAt).getTime();
       if (!Number.isFinite(t)) continue;
-      events.push({ t, mg: dose.amountMg, medicineId: dose.medicineId, doseId: dose.id });
+      events.push({ t, mg, medicineId: dose.medicineId, doseId: dose.id });
     }
     return events;
   }
@@ -308,17 +419,33 @@
     return { lastAt, nextAt: lastAt + medicine.intervalHours * HOUR_MS };
   }
 
-  function assessDose(state, input, now) {
+  function draftParts(medicine, input) {
+    if (Array.isArray(input.parts) && input.parts.length) {
+      return input.parts.map((part) => ({
+        ingredientId: part && part.ingredientId,
+        amountMg: parseNum(part ? part.amountMg : NaN)
+      }));
+    }
+    const parts = medicineParts(medicine);
     const amountMg = parseNum(input.amountMg);
+    if (parts.length === 1) return [{ ingredientId: parts[0].ingredientId, amountMg }];
+    return [];
+  }
+
+  function assessDose(state, input, now) {
     const takenAt = input.takenAt instanceof Date ? input.takenAt : null;
-    const amountValid = Number.isFinite(amountMg) && amountMg > 0 && amountMg <= 20000;
     const takenAtValid = !!(takenAt && !Number.isNaN(takenAt.getTime()));
     const medicine = state.medicines.find((item) => item.id === input.medicineId);
+    const parts = medicine ? draftParts(medicine, input) : [];
+    const tooLarge = parts.some((part) => Number.isFinite(part.amountMg) && part.amountMg > 20000);
+    const amountValid =
+      parts.length > 0 &&
+      parts.every((part) => Number.isFinite(part.amountMg) && part.amountMg > 0 && part.amountMg <= 20000);
     const errors = [];
     if (!medicine) errors.push("Choose a medicine.");
     if (!amountValid) {
       errors.push(
-        Number.isFinite(amountMg) && amountMg > 20000
+        tooLarge
           ? "That amount is too large to log. Enter the milligrams in this dose."
           : "Enter the amount in milligrams."
       );
@@ -333,34 +460,54 @@
       peakMg: null,
       maxMg: null,
       ingredientName: null,
+      ingredients: [],
       nextDoseAt: null,
       medicineName: medicine ? medicine.name : null
     };
     if (!medicine || !amountValid || !takenAtValid) return base;
 
-    const ingredient = state.ingredients.find((item) => item.id === medicine.ingredientId);
-    if (!ingredient) {
-      base.errors = ["This medicine is missing its daily max."];
-      return base;
+    const resolved = [];
+    for (const part of parts) {
+      const ingredient = state.ingredients.find((item) => item.id === part.ingredientId);
+      if (!ingredient) {
+        base.errors = ["This medicine is missing its daily max."];
+        return base;
+      }
+      resolved.push({ part, ingredient });
     }
 
-    const events = ingredientEvents(state, ingredient.id, input.excludeDoseId || null);
     const takenMs = takenAt.getTime();
-    const withDose = events.concat([{ t: takenMs, mg: amountMg, medicineId: medicine.id, doseId: "draft" }]);
-    const peakWith = peakMg(withDose);
-    const peakWithout = peakMg(events);
     const warnings = [];
-
-    if (peakWith > ingredient.maxPer24hMg + 1e-6 && peakWith > peakWithout + 1e-6) {
-      warnings.push({
-        code: "over-max",
+    const ingredientResults = [];
+    for (const item of resolved) {
+      const events = ingredientEvents(state, item.ingredient.id, input.excludeDoseId || null);
+      const withDose = events.concat([
+        { t: takenMs, mg: item.part.amountMg, medicineId: medicine.id, doseId: "draft" }
+      ]);
+      const peakWith = peakMg(withDose);
+      const peakWithout = peakMg(events);
+      ingredientResults.push({
+        ingredientId: item.ingredient.id,
+        ingredientName: item.ingredient.name,
         peakMg: peakWith,
-        maxMg: ingredient.maxPer24hMg,
-        ingredientName: ingredient.name
+        maxMg: item.ingredient.maxPer24hMg,
+        amountMg: item.part.amountMg
       });
-    }
-    if (amountMg >= 5000) {
-      warnings.push({ code: "large-amount", amountMg });
+      if (peakWith > item.ingredient.maxPer24hMg + 1e-6 && peakWith > peakWithout + 1e-6) {
+        warnings.push({
+          code: "over-max",
+          peakMg: peakWith,
+          maxMg: item.ingredient.maxPer24hMg,
+          ingredientName: item.ingredient.name
+        });
+      }
+      if (item.part.amountMg >= 5000) {
+        warnings.push({
+          code: "large-amount",
+          amountMg: item.part.amountMg,
+          ingredientName: item.ingredient.name
+        });
+      }
     }
     if (takenMs > now.getTime() + 5 * 60 * 1000) {
       warnings.push({ code: "future", at: takenMs });
@@ -368,14 +515,14 @@
 
     const intervalMs = medicine.intervalHours * HOUR_MS;
     if (intervalMs > 0) {
-      const same = events.filter((event) => event.medicineId === medicine.id);
       let prev = null;
       let next = null;
-      for (const event of same) {
-        // Equal timestamps still count. The form only stores minutes, so two
-        // doses logged for the same minute are not six hours apart.
-        if (event.t <= takenMs && (!prev || event.t > prev.t)) prev = event;
-        if (event.t > takenMs && (!next || event.t < next.t)) next = event;
+      for (const dose of state.doses) {
+        if (dose.id === (input.excludeDoseId || null) || dose.medicineId !== medicine.id) continue;
+        const t = new Date(dose.takenAt).getTime();
+        if (!Number.isFinite(t)) continue;
+        if (t <= takenMs && (!prev || t > prev.t)) prev = { t };
+        if (t > takenMs && (!next || t < next.t)) next = { t };
       }
       if (prev && takenMs - prev.t < intervalMs) {
         warnings.push({
@@ -394,10 +541,17 @@
       }
 
       let closest = null;
-      for (const event of events) {
-        if (event.medicineId === medicine.id) continue;
-        const dist = Math.abs(event.t - takenMs);
-        if (dist < intervalMs && (!closest || dist < closest.dist)) closest = { event, dist };
+      const seen = new Set();
+      for (const item of resolved) {
+        if (seen.has(item.ingredient.id)) continue;
+        seen.add(item.ingredient.id);
+        for (const event of ingredientEvents(state, item.ingredient.id, input.excludeDoseId || null)) {
+          if (event.medicineId === medicine.id) continue;
+          const dist = Math.abs(event.t - takenMs);
+          if (dist < intervalMs && (!closest || dist < closest.dist)) {
+            closest = { event, dist, ingredientName: item.ingredient.name };
+          }
+        }
       }
       if (closest) {
         warnings.push({
@@ -405,19 +559,21 @@
           at: closest.event.t,
           otherMedicineId: closest.event.medicineId,
           intervalHours: medicine.intervalHours,
-          ingredientName: ingredient.name
+          ingredientName: closest.ingredientName
         });
       }
     }
 
+    const first = ingredientResults[0];
     return {
       errors: [],
       warnings,
       amountValid: true,
       takenAtValid: true,
-      peakMg: peakWith,
-      maxMg: ingredient.maxPer24hMg,
-      ingredientName: ingredient.name,
+      peakMg: first.peakMg,
+      maxMg: first.maxMg,
+      ingredientName: first.ingredientName,
+      ingredients: ingredientResults,
       nextDoseAt: intervalMs > 0 ? takenMs + intervalMs : null,
       medicineName: medicine.name
     };
@@ -445,6 +601,7 @@
     toLocalInput,
     fromLocalInput,
     normName,
+    medicineParts,
     peakMg,
     ingredientWindow,
     medicineTiming,

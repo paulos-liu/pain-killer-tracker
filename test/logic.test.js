@@ -289,12 +289,120 @@ test("commas in a typed amount are thousands separators", () => {
   assert.equal(PainLog.parseNum(""), NaN);
 });
 
-test("presets cover ibuprofen and both common acetaminophen labels", () => {
+test("presets cover ibuprofen, acetaminophen, and a two-drug tablet", () => {
   const ids = PainLog.PRESETS.map((item) => item.id);
-  assert.deepEqual(ids, ["ibuprofen", "acetaminophen-es", "acetaminophen-regular"]);
+  assert.deepEqual(ids, ["ibuprofen", "acetaminophen-es", "acetaminophen-regular", "percocet"]);
   const ibu = PainLog.PRESETS[0];
   assert.equal(ibu.maxPer24hMg, 1200);
   assert.equal(ibu.intervalHours, 6);
   assert.equal(PainLog.PRESETS[1].maxPer24hMg, 3000);
   assert.equal(PainLog.PRESETS[1].ingredientName, PainLog.PRESETS[2].ingredientName);
+  const percocet = PainLog.PRESETS.find((item) => item.id === "percocet");
+  assert.equal(percocet.doseWords, "1 tablet");
+  assert.equal(percocet.parts[0].ingredientName, "Oxycodone");
+  assert.equal(percocet.parts[0].mgPerUnit, 5);
+  assert.equal(percocet.parts[0].maxPer24hMg, null);
+  assert.equal(percocet.parts[1].ingredientName, "Acetaminophen");
+  assert.equal(percocet.parts[1].mgPerUnit, 325);
+  assert.equal(percocet.parts[1].maxPer24hMg, 3000);
+});
+
+test("an older save becomes one part on the medicine and the dose", () => {
+  const result = PainLog.normalize({
+    version: 1,
+    ingredients: [{ id: "ing", name: "Ibuprofen", maxPer24hMg: 1200 }],
+    medicines: [
+      {
+        id: "med",
+        name: "Ibuprofen",
+        ingredientId: "ing",
+        usualDoseMg: 200,
+        doseWords: "1 tablet",
+        intervalHours: 6,
+        asNeeded: true,
+        active: true
+      }
+    ],
+    doses: [
+      {
+        id: "ok",
+        medicineId: "med",
+        takenAt: "2026-11-07T18:00:00.000Z",
+        amountMg: 400,
+        doseWords: "",
+        painBefore: null,
+        painAfter: null,
+        note: ""
+      }
+    ]
+  });
+  assert.equal(result.state.version, 2);
+  assert.deepEqual(result.state.medicines[0].parts, [{ ingredientId: "ing", mgPerUnit: 200 }]);
+  assert.deepEqual(result.state.doses[0].parts, [{ ingredientId: "ing", amountMg: 400 }]);
+  const window = PainLog.ingredientWindow(result.state, "ing", new Date("2026-11-07T18:30:00.000Z"));
+  assert.equal(window.used, 400);
+});
+
+test("a combination tablet counts each drug toward its own max", () => {
+  const state = stateWith();
+  state.ingredients.push({ id: "ing-oxy", name: "Oxycodone", maxPer24hMg: 30 });
+  state.medicines.push({
+    id: "med-percocet",
+    name: "Percocet",
+    ingredientId: "ing-oxy",
+    usualDoseMg: 5,
+    parts: [
+      { ingredientId: "ing-oxy", mgPerUnit: 5 },
+      { ingredientId: "ing-ace", mgPerUnit: 325 }
+    ],
+    doseWords: "1 tablet",
+    intervalHours: 6,
+    asNeeded: true,
+    active: true
+  });
+  state.doses = [
+    dose("ace", "med-ace", 0, 2800),
+    {
+      id: "tab",
+      medicineId: "med-percocet",
+      takenAt: new Date(HOUR).toISOString(),
+      amountMg: 330,
+      parts: [
+        { ingredientId: "ing-oxy", amountMg: 5 },
+        { ingredientId: "ing-ace", amountMg: 325 }
+      ],
+      doseWords: "1 tablet",
+      painBefore: null,
+      painAfter: null,
+      note: ""
+    }
+  ];
+  const now = new Date(2 * HOUR);
+  assert.equal(PainLog.ingredientWindow(state, "ing-ace", now).used, 3125);
+  assert.equal(PainLog.ingredientWindow(state, "ing-oxy", now).used, 5);
+  assert.equal(PainLog.ingredientWindow(state, "ing-ibu", now).used, 0);
+
+  const second = PainLog.assessDose(
+    state,
+    {
+      medicineId: "med-percocet",
+      parts: [
+        { ingredientId: "ing-oxy", amountMg: 5 },
+        { ingredientId: "ing-ace", amountMg: 325 }
+      ],
+      takenAt: now,
+      excludeDoseId: null
+    },
+    now
+  );
+  const over = second.warnings.filter((item) => item.code === "over-max");
+  assert.equal(over.length, 1);
+  assert.equal(over[0].ingredientName, "Acetaminophen");
+  assert.equal(over[0].peakMg, 3450);
+  const oxy = second.ingredients.find((item) => item.ingredientName === "Oxycodone");
+  assert.equal(oxy.peakMg, 10);
+  assert.equal(oxy.maxMg, 30);
+  const shared = second.warnings.find((item) => item.code === "early-shared");
+  assert.equal(shared.otherMedicineId, "med-ace");
+  assert.equal(shared.ingredientName, "Acetaminophen");
 });

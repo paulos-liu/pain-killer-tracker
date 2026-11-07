@@ -256,6 +256,30 @@ section + section {
   color: var(--danger);
 }
 
+.summary.tone-over .summary-total:not(.is-over) .num {
+  color: var(--accent-ink);
+}
+
+.meter-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.meter-block + .meter-block {
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.meter-label {
+  margin: 0;
+  font-weight: 700;
+}
+
+.card.is-combo .readout .num {
+  font-size: 1.55rem;
+}
+
 .meter {
   height: 16px;
   background: var(--track);
@@ -329,6 +353,16 @@ section + section {
   margin: 14px 0 0;
 }
 
+.panel .add-row .btn-primary {
+  width: 100%;
+}
+
+@media (max-width: 520px) {
+  .part-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .preset-list {
   display: flex;
   flex-direction: column;
@@ -382,6 +416,116 @@ section + section {
   min-height: 44px;
 }
 
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.filters .btn[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--on-accent);
+  border-color: var(--accent);
+}
+
+.custom-range {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 12px;
+}
+
+.custom-range input[type="date"] {
+  background: var(--paper);
+  border: 1.5px solid var(--line);
+  border-radius: 12px;
+  min-height: 44px;
+  padding: 8px 12px;
+}
+
+.range-label {
+  margin: 12px 0 0;
+  font-weight: 700;
+}
+
+.meds {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.meds th,
+.log th {
+  text-align: left;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--ink-soft);
+  padding: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.meds td {
+  padding: 14px 8px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.med-name {
+  font-weight: 700;
+  font-size: 1.15rem;
+}
+
+.pct-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 180px;
+}
+
+.pct-line {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pct-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.pct {
+  margin-left: auto;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--accent-ink);
+}
+
+.pct.tone-near {
+  color: var(--warn);
+}
+
+.pct.tone-over {
+  color: var(--danger);
+}
+
+.pct-sub {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.92rem;
+}
+
+.meds .row-actions {
+  justify-content: flex-end;
+}
+
+.meds .btn-primary {
+  min-width: 72px;
+}
+
 .day-line {
   display: flex;
   align-items: center;
@@ -414,11 +558,13 @@ section + section {
 
 .table-wrap {
   overflow-x: auto;
+  max-width: 100%;
   margin-top: 14px;
 }
 
 .log {
   width: 100%;
+  min-width: 720px;
   border-collapse: collapse;
 }
 
@@ -557,6 +703,36 @@ dialog.modal::backdrop {
   border-radius: 12px;
   padding: 10px 12px;
   margin: 12px 0 0;
+}
+
+.parts {
+  margin-top: 16px;
+}
+
+.parts-label {
+  margin: 0 0 8px;
+  font-weight: 700;
+}
+
+.part {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 4px 12px 12px;
+  margin: 0 0 10px;
+}
+
+.part-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.part .btn-quiet {
+  margin-top: 4px;
+}
+
+.parts > .btn-secondary {
+  width: 100%;
 }
 
 .field {
@@ -765,56 +941,33 @@ fieldset.mode {
 }
 
 @media (max-width: 800px) {
-  .log thead {
-    display: none;
-  }
-
-  .log,
-  .log tbody,
-  .log tr,
-  .log td {
+  .meds,
+  .meds thead,
+  .meds tbody,
+  .meds tr,
+  .meds td {
     display: block;
   }
 
-  .log tr {
+  .meds thead {
+    display: none;
+  }
+
+  .meds tr {
     border: 1px solid var(--line);
     border-radius: 16px;
-    padding: 10px 12px;
+    padding: 12px;
     margin-bottom: 10px;
     background: var(--paper);
   }
 
-  .log td {
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    align-items: center;
-    padding: 6px 0;
+  .meds td {
     border-bottom: none;
+    padding: 6px 0;
   }
 
-  .log td::before {
-    content: attr(data-label);
-    color: var(--ink-soft);
-    font-weight: 700;
-    flex: none;
-  }
-
-  .log td.actions::before {
-    display: none;
-  }
-
-  .log tr.is-over,
-  .log tr.is-early:not(.is-over) {
-    background: var(--paper);
-  }
-
-  .log tr.is-over {
-    box-shadow: inset 4px 0 0 var(--danger);
-  }
-
-  .log tr.is-early:not(.is-over) {
-    box-shadow: inset 4px 0 0 var(--warn);
+  .meds .row-actions {
+    justify-content: flex-start;
   }
 }
 
