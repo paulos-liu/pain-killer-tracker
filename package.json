@@ -1,0 +1,15 @@
+{
+  "name": "pain-killer-tracker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "cf dev",
+    "deploy": "cf deploy",
+    "test": "node --test test/logic.test.cjs"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^2.0.0-beta.v.13",
+    "cf": "^0.15.0",
+    "vite": "^8.3.7"
+  }
+}

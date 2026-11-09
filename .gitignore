@@ -1,1 +1,8 @@
 .DS_Store
+node_modules
+.cloudflare
+.wrangler
+.dev.vars
+public
+index.html.hold
+

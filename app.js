@@ -1,5 +1,8 @@
 (function () {
   const STORAGE_KEY = "pain-medicine-log.v1";
+  const OWNED_SESSION_KEY = "pain-medicine-log.owned-session";
+  const LAST_SESSION_KEY = "pain-medicine-log.last-session";
+  const SESSION_CODE = /^[0-9abcdefghjkmnpqrstvwxyz]{16}$/;
   const PAIN = [
     { id: "mild", label: "Mild" },
     { id: "moderate", label: "Moderate" },
@@ -101,15 +104,219 @@
     }, 3500);
   }
 
+  function sessionFromLocation() {
+    const params = new URLSearchParams(location.search);
+    const id = String(params.get("session") || "").toLowerCase().replace(/[^0-9a-z]/g, "");
+    return SESSION_CODE.test(id) ? id : "";
+  }
+
+  const sessionId = sessionFromLocation();
+  let sessionPushTimer = 0;
+  let sessionPushing = 0;
+  let localRevision = 0;
+  let polling = false;
+  let pollMissingNoted = false;
+
+  function readSessionKey(key) {
+    try {
+      const id = String(localStorage.getItem(key) || "").toLowerCase();
+      return SESSION_CODE.test(id) ? id : "";
+    } catch (err) {
+      return "";
+    }
+  }
+
+  function writeSessionKey(key, id) {
+    try {
+      localStorage.setItem(key, id);
+    } catch (err) {
+      /* the link still works for this visit */
+    }
+  }
+
+  function forgetSession(id) {
+    try {
+      if (localStorage.getItem(OWNED_SESSION_KEY) === id) localStorage.removeItem(OWNED_SESSION_KEY);
+      if (localStorage.getItem(LAST_SESSION_KEY) === id) localStorage.removeItem(LAST_SESSION_KEY);
+    } catch (err) {
+      /* the unwanted code simply stays unused */
+    }
+  }
+
+  function preferredSession() {
+    return readSessionKey(OWNED_SESSION_KEY) || readSessionKey(LAST_SESSION_KEY);
+  }
+
+  function saveLocal() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(PainLog.serialize(state)));
+  }
+
+  function queueSessionPush() {
+    if (!sessionId) return;
+    localRevision += 1;
+    clearTimeout(sessionPushTimer);
+    sessionPushTimer = setTimeout(() => {
+      sessionPushTimer = 0;
+      const payload = JSON.stringify(PainLog.serialize(state));
+      sessionPushing += 1;
+      fetch(`/api/sessions/${sessionId}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: payload
+      }).then((response) => {
+        if (!response.ok) toast("Saved on this device. The shared log did not update.");
+      }).catch(() => {
+        toast("Saved on this device. The shared log did not update.");
+      }).finally(() => {
+        sessionPushing -= 1;
+      });
+    }, 250);
+  }
+
   function persist() {
     if (persistBlocked) return false;
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(PainLog.serialize(state)));
-      return true;
+      saveLocal();
     } catch (err) {
       toast("Could not save on this device. Download a backup before you leave this page.");
       return false;
     }
+    queueSessionPush();
+    return true;
+  }
+
+  function rememberRemote(next) {
+    state = next;
+    persistBlocked = false;
+    writeSessionKey(LAST_SESSION_KEY, sessionId);
+    try { saveLocal(); } catch (err) { /* the shared copy is still on screen */ }
+  }
+
+  async function loadSharedSession() {
+    const response = await fetch(`/api/sessions/${sessionId}`, {
+      headers: { accept: "application/json" },
+      cache: "no-store"
+    });
+    if (response.status === 404) {
+      forgetSession(sessionId);
+      toast("No log exists for that code.");
+      return;
+    }
+    if (!response.ok) throw new Error("load failed");
+    const body = await response.json();
+    const result = PainLog.normalize(body);
+    if (!result.recognized) throw new Error("unrecognized");
+    rememberRemote(result.state);
+  }
+
+  function pollWouldClobber() {
+    if (ui.dialog) return true;
+    const el = document.activeElement;
+    if (!el || el === document.body) return false;
+    return el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT";
+  }
+
+  async function pollSharedSession() {
+    if (!sessionId || polling || sessionPushTimer || sessionPushing || document.hidden) return;
+    if (pollWouldClobber()) return;
+    const revision = localRevision;
+    polling = true;
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}`, {
+        headers: { accept: "application/json" },
+        cache: "no-store"
+      });
+      if (revision !== localRevision || sessionPushTimer || sessionPushing || pollWouldClobber()) return;
+      if (response.status === 404) {
+        if (!pollMissingNoted) {
+          pollMissingNoted = true;
+          forgetSession(sessionId);
+          toast("No log exists for that code.");
+        }
+        return;
+      }
+      if (!response.ok) return;
+      const result = PainLog.normalize(await response.json());
+      if (!result.recognized) return;
+      const current = JSON.stringify(PainLog.serialize(state));
+      const incoming = JSON.stringify(PainLog.serialize(result.state));
+      if (current === incoming) return;
+      rememberRemote(result.state);
+      render();
+    } catch (err) {
+      /* the next poll tries again */
+    } finally {
+      polling = false;
+    }
+  }
+
+  let sessionPromise = null;
+
+  function ensureSession() {
+    if (sessionId) return Promise.resolve(sessionId);
+    if (!sessionPromise) {
+      sessionPromise = (async () => {
+        let id = "";
+        let sent = "";
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const payload = JSON.stringify(PainLog.serialize(state));
+          if (id && payload === sent) break;
+          if (!id) {
+            const response = await fetch("/api/sessions", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: payload
+            });
+            if (!response.ok) throw new Error("create failed");
+            const body = await response.json();
+            if (!SESSION_CODE.test(body.id)) throw new Error("bad id");
+            id = body.id;
+          } else {
+            const response = await fetch(`/api/sessions/${id}`, {
+              method: "PUT",
+              headers: { "content-type": "application/json" },
+              body: payload
+            });
+            if (!response.ok) throw new Error("save failed");
+          }
+          sent = payload;
+        }
+        writeSessionKey(OWNED_SESSION_KEY, id);
+        writeSessionKey(LAST_SESSION_KEY, id);
+        return id;
+      })().catch((err) => {
+        sessionPromise = null;
+        throw err;
+      });
+    }
+    return sessionPromise;
+  }
+
+  function goToSession(id) {
+    const url = new URL(location.href);
+    url.searchParams.set("session", id);
+    location.replace(url.toString());
+  }
+
+  async function shareSession() {
+    let id = "";
+    try {
+      id = await ensureSession();
+    } catch (err) {
+      toast("Could not share this log. A shared code needs the Cloudflare site.");
+      return;
+    }
+    const url = new URL(location.href);
+    url.searchParams.set("session", id);
+    const link = url.toString();
+    try {
+      if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error("no clipboard");
+      await navigator.clipboard.writeText(link);
+      toast("Link copied.");
+    } catch (err) {
+      toast(link);
+    }
+    if (!sessionId) goToSession(id);
   }
 
   function download(filename, text) {
@@ -296,62 +503,126 @@
     return used;
   }
 
-  function pctBlock(ingredient, reading, showLabel, periodLabel) {
+  function barWidths(used, added, max) {
+    if (!(max > 0)) return { used: 0, next: 0, edge: 0 };
+    const usedPct = Math.max(0, Math.min(100, (used / max) * 100));
+    const totalPct = Math.max(0, Math.min(100, ((used + added) / max) * 100));
+    return { used: usedPct, next: Math.max(0, totalPct - usedPct), edge: totalPct };
+  }
+
+  function forecastLine(reading, added) {
+    if (!(added > 0) || !(reading.max > 0)) return "";
+    const total = reading.used + added;
+    const text = `${PainLog.formatMg(total)} of ${PainLog.formatMg(reading.max)} mg`;
+    if (total > reading.max + 1e-6) return `Would be ${text} · ${PainLog.formatMg(total - reading.max)} mg over`;
+    return `Would be ${text}`;
+  }
+
+  function pctBlock(ingredient, reading, showLabel, periodLabel, added) {
+    const extra = added > 0 ? added : 0;
     const tone = toneFor(reading.used, reading.max);
-    const ratio = reading.max > 0 ? (reading.used / reading.max) * 100 : 0;
-    const width = Math.max(0, Math.min(100, ratio));
+    const widths = barWidths(reading.used, extra, reading.max);
     const pct = formatPct(reading.used, reading.max);
+    const preview = extra > 0 && reading.max > 0;
+    const total = reading.used + extra;
+    const over = preview && total > reading.max + 1e-6;
+    const pin = preview && widths.edge > 78;
+    const forecast = preview ? `${PainLog.formatMg(total)} mg` : "";
+    const forecastPct = preview ? formatPct(total, reading.max) : "";
+    const label = preview
+      ? `${ingredient.name}, ${pct} of the daily max ${periodLabel}. Would be ${forecastPct} after the usual dose`
+      : `${ingredient.name}, ${pct} of the daily max ${periodLabel}`;
+    const forecastHtml = preview
+      ? `<span class="meter-next${over ? " is-over" : ""}" style="width:${widths.next}%"></span>
+        <span class="meter-forecast${over ? " is-over" : ""}${pin ? " pin-end" : ""}" style="${pin ? "" : `left:${widths.edge}%`}">${esc(forecast)}</span>`
+      : "";
+    const note = preview ? `<p class="pct-forecast${over ? " is-over" : ""}">${esc(forecastLine(reading, extra))}</p>` : "";
     return `<div class="pct-line">
       <div class="pct-head">
         ${showLabel ? `<p class="meter-label">${esc(ingredient.name)}</p>` : `<span class="sr">${esc(ingredient.name)}</span>`}
         <span class="pct tone-${tone}">${esc(pct)}</span>
       </div>
-      <div class="meter tone-${tone}" role="meter" aria-valuemin="0" aria-valuemax="${esc(reading.max)}" aria-valuenow="${esc(reading.used)}" aria-label="${esc(ingredient.name)}, ${esc(pct)} of the daily max ${esc(periodLabel)}">
-        <span style="width:${width}%"></span>
+      <div class="meter${preview ? " has-preview" : ""} tone-${tone}" role="meter" aria-valuemin="0" aria-valuemax="${esc(reading.max)}" aria-valuenow="${esc(reading.used)}" aria-label="${esc(label)}">
+        <span class="meter-used" style="width:${widths.used}%"></span>
+        ${forecastHtml}
       </div>
       <p class="pct-sub">${esc(mgLine(reading))}</p>
+      ${note}
     </div>`;
   }
 
-  function usageBars(med, read, periodLabel) {
+  function usageBars(med, read, periodLabel, preview) {
     const parts = PainLog.medicineParts(med);
     return parts
       .map((part) => {
         const ingredient = ingredientById(part.ingredientId);
         if (!ingredient) return "";
         const showLabel = parts.length > 1 || PainLog.normName(med.name) !== PainLog.normName(ingredient.name);
-        return pctBlock(ingredient, read(ingredient.id), showLabel, periodLabel);
+        const added = preview ? part.mgPerUnit : 0;
+        return pctBlock(ingredient, read(ingredient.id), showLabel, periodLabel, added);
       })
       .join("");
   }
 
-  function medicineRow(med, now) {
-    const todayBars = usageBars(med, (id) => PainLog.ingredientDay(state, id, now), "since midnight");
-    const rollingBars = usageBars(med, (id) => PainLog.ingredientWindow(state, id, now), "in the last 24 hours");
-    const timing = PainLog.medicineTiming(state, med, now);
-    let next = "No interval set.";
-    if (med.intervalHours > 0 && timing.lastAt === null) next = "No doses logged yet.";
-    if (med.intervalHours > 0 && timing.nextAt !== null) {
-      const label = med.asNeeded ? "Earliest next dose" : "Next dose";
-      next = `${label} <time>${esc(formatTime(timing.nextAt))}</time> <span class="rel" data-rel="${timing.nextAt}">${esc(relPhrase(timing.nextAt, now.getTime()))}</span>`;
+  function homeIngredients(now) {
+    const ids = new Set();
+    for (const med of state.medicines) {
+      if (!med.active) continue;
+      for (const part of PainLog.medicineParts(med)) {
+        if (part.ingredientId) ids.add(part.ingredientId);
+      }
     }
-    const shared = shareLine(med);
+    for (const ingredient of state.ingredients) {
+      if (ids.has(ingredient.id)) continue;
+      const day = PainLog.ingredientDay(state, ingredient.id, now);
+      const rolling = PainLog.ingredientWindow(state, ingredient.id, now);
+      if (day.used > 0 || rolling.used > 0) ids.add(ingredient.id);
+    }
+    return [...ids]
+      .map((id) => ingredientById(id))
+      .filter(Boolean)
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  function ingredientRow(ingredient, now) {
+    const today = pctBlock(ingredient, PainLog.ingredientDay(state, ingredient.id, now), false, "since midnight", 0);
+    const rolling = pctBlock(ingredient, PainLog.ingredientWindow(state, ingredient.id, now), false, "in the last 24 hours", 0);
     return `<tr>
-      <td data-label="Medicine">
-        <div class="med-name">${esc(med.name)}</div>
+      <td data-label="Chemical"><div class="med-name">${esc(ingredient.name)}</div></td>
+      <td data-label="Today"><div class="pct-stack"><p class="pct-caption">Today</p>${today}</div></td>
+      <td data-label="Last 24 hours"><div class="pct-stack"><p class="pct-caption">Last 24 hours</p>${rolling}</div></td>
+    </tr>`;
+  }
+
+  function nextLine(med, now) {
+    const timing = PainLog.medicineTiming(state, med, now);
+    if (!(med.intervalHours > 0)) return "No interval set.";
+    if (timing.lastAt === null) return "No doses logged yet.";
+    if (timing.nextAt === null) return "No interval set.";
+    const label = med.asNeeded ? "Earliest next dose" : "Next dose";
+    return `${label} <time>${esc(formatTime(timing.nextAt))}</time> <span class="rel" data-rel="${timing.nextAt}">${esc(relPhrase(timing.nextAt, now.getTime()))}</span>`;
+  }
+
+  function medicineChoice(med, now, open) {
+    const shared = shareLine(med);
+    const todayBars = usageBars(med, (id) => PainLog.ingredientDay(state, id, now), "since midnight", true);
+    const rollingBars = usageBars(med, (id) => PainLog.ingredientWindow(state, id, now), "in the last 24 hours", true);
+    return `<details class="med-choice" ${open ? "open" : ""}>
+      <summary>${esc(med.name)}</summary>
+      <div class="med-choice-body">
         <p class="meta">${esc(usualLine(med))}</p>
         ${shared ? `<p class="share">${esc(shared)}</p>` : ""}
-        <p class="next">${next}</p>
-      </td>
-      <td data-label="Today"><div class="pct-stack"><p class="pct-caption">Today</p>${todayBars}</div></td>
-      <td data-label="Last 24 hours"><div class="pct-stack"><p class="pct-caption">Last 24 hours</p>${rollingBars}</div></td>
-      <td class="actions" data-label="">
+        <p class="next">${nextLine(med, now)}</p>
+        <div class="choice-meters">
+          <div><p class="pct-caption is-on">Today</p>${todayBars}</div>
+          <div><p class="pct-caption is-on">Last 24 hours</p>${rollingBars}</div>
+        </div>
         <div class="row-actions">
           <button type="button" class="btn btn-primary" data-action="log-dose" data-id="${esc(med.id)}" data-focus-key="log-${esc(med.id)}">Log<span class="sr"> a dose of ${esc(med.name)}</span></button>
           <button type="button" class="btn btn-quiet" data-action="edit-medicine" data-id="${esc(med.id)}" data-focus-key="edit-med-${esc(med.id)}">Edit<span class="sr"> ${esc(med.name)}</span></button>
         </div>
-      </td>
-    </tr>`;
+      </div>
+    </details>`;
   }
 
   function retiredBlock(retired) {
@@ -368,31 +639,30 @@
     </details>`;
   }
 
+  function logUsageButton() {
+    return `<button type="button" class="btn btn-primary" data-action="log-usage" data-focus-key="log-usage">Log medicine usage</button>`;
+  }
+
   function cardsSection(now) {
-    const active = state.medicines
-      .filter((item) => item.active)
-      .sort((a, b) => a.name.localeCompare(b.name));
-    const retired = state.medicines.filter((item) => !item.active);
-    if (!active.length) {
+    const ingredients = homeIngredients(now);
+    if (!ingredients.length) {
       return `<section class="panel">
         <h2>No medicines yet</h2>
-        <p class="add-row"><button type="button" class="btn btn-primary" data-action="add-medicine" data-focus-key="add-medicine">Add a medicine</button></p>
-        ${retiredBlock(retired)}
+        <p class="add-row">${logUsageButton()}</p>
       </section>`;
     }
     return `<section>
-      <div class="section-head">
+      <div class="section-head usage-head">
         <h2>Usage</h2>
+        ${logUsageButton()}
       </div>
       <div class="table-wrap">
         <table class="meds">
-          <caption class="sr">Percent of each daily max used since midnight, and in the last 24 hours</caption>
-          <thead><tr><th scope="col">Medicine</th><th scope="col">Today</th><th scope="col">Last 24 hours</th><th scope="col"><span class="sr">Actions</span></th></tr></thead>
-          <tbody>${active.map((med) => medicineRow(med, now)).join("")}</tbody>
+          <caption class="sr">Percent of each chemical's daily max used since midnight, and in the last 24 hours</caption>
+          <thead><tr><th scope="col">Chemical</th><th scope="col">Today</th><th scope="col">Last 24 hours</th></tr></thead>
+          <tbody>${ingredients.map((ingredient) => ingredientRow(ingredient, now)).join("")}</tbody>
         </table>
       </div>
-      <p class="add-row"><button type="button" class="btn btn-secondary" data-action="add-medicine" data-focus-key="add-medicine">Add a medicine</button></p>
-      ${retiredBlock(retired)}
     </section>`;
   }
 
@@ -770,6 +1040,35 @@
       </div>`);
   }
 
+  function usageReturn(openId) {
+    return { type: "log-usage", openId: openId || "" };
+  }
+
+  function logUsageDialog() {
+    const now = new Date();
+    const active = state.medicines
+      .filter((item) => item.active)
+      .sort((a, b) => a.name.localeCompare(b.name));
+    const retired = state.medicines.filter((item) => !item.active);
+    const openId = ui.dialog.openId || "";
+    const choices = active.length
+      ? `<div class="med-choices">${active.map((med) => medicineChoice(med, now, med.id === openId)).join("")}</div>`
+      : `<p class="section-copy">No medicines yet.</p>`;
+    return sheet(`<div class="sheet-form">
+      <div class="sheet-top">
+        <h2 id="dialog-title" tabindex="-1" data-autofocus>Log medicine usage</h2>
+        <button type="button" class="btn btn-quiet" data-action="close-dialog">Close</button>
+      </div>
+      <div class="sheet-body">
+        ${choices}
+        ${retiredBlock(retired)}
+      </div>
+      <div class="sheet-actions">
+        <button type="button" class="btn btn-secondary" data-action="add-medicine" data-focus-key="add-medicine">Add a medicine</button>
+      </div>
+    </div>`);
+  }
+
   function pickerDialog() {
     return sheet(`<div class="sheet-form">
       <div class="sheet-top">
@@ -880,6 +1179,7 @@
 
   function dialogHtml() {
     if (!ui.dialog) return "";
+    if (ui.dialog.type === "log-usage") return logUsageDialog();
     if (ui.dialog.type === "medicine" && ui.dialog.stage === "pick") return pickerDialog();
     if (ui.dialog.type === "medicine") return medicineDialog();
     if (ui.dialog.type === "dose" && ui.dialog.step === "confirm") return confirmDoseDialog();
@@ -891,7 +1191,6 @@
   function corruptView() {
     return `<div class="wrap">
       <header class="top">
-        <p class="eyebrow">On this device</p>
         <h1>Pain medicine log</h1>
       </header>
       <div class="errors" role="alert">
@@ -918,18 +1217,15 @@
     const tab = ui.tab === "log" ? "log" : "medicines";
     return `<div class="wrap">
       <header class="top">
-        <p class="eyebrow">On this device</p>
         <h1>Pain medicine log</h1>
+        <button type="button" class="btn btn-secondary share-session no-print" data-action="share-session" data-focus-key="share-session">Share session</button>
       </header>
-      <aside class="safety">
-        <p><strong>Call 911</strong> if breathing slows or stops, or if the person cannot be woken.</p>
-      </aside>
       ${tabBar()}
       <div role="tabpanel" id="panel-${tab}" aria-labelledby="tab-${tab}">
         ${tab === "log" ? logSection(now) : cardsSection(now)}
       </div>
       <footer>
-        <p>Saved in this browser. Not medical advice.</p>
+        ${sessionId ? `<p>Anyone with this code can open and change this log. Not medical advice.</p>` : ""}
         <div class="footer-actions no-print">
           <button type="button" class="btn btn-quiet" data-action="download-backup">Download backup</button>
           <button type="button" class="btn btn-quiet" data-action="restore-backup">Restore backup</button>
@@ -976,12 +1272,18 @@
       openEditMedicine(ui.dialog.medicineId);
       return;
     }
+    if (ui.dialog.returnTo && ui.dialog.returnTo.type === "log-usage") {
+      ui.dialog = usageReturn(ui.dialog.returnTo.openId);
+      render();
+      return;
+    }
     ui.dialog = null;
     render();
+    pollSharedSession();
   }
 
   function syncFromDom() {
-    const form = document.querySelector("form[data-form]");
+    const form = document.querySelector("dialog form[data-form]");
     if (!form || !ui.dialog) return;
     const data = new FormData(form);
     if (form.dataset.form === "dose") {
@@ -1106,7 +1408,8 @@
   }
 
   function openAdd() {
-    ui.dialog = { type: "medicine", stage: "pick" };
+    const returnTo = ui.dialog && ui.dialog.type === "log-usage" ? usageReturn(ui.dialog.openId) : (ui.dialog && ui.dialog.returnTo) || null;
+    ui.dialog = { type: "medicine", stage: "pick", returnTo };
     render();
   }
 
@@ -1122,14 +1425,16 @@
       asNeeded: true,
       focusPartKey: "",
       errors: [],
+      returnTo: null,
       ...partial
     };
     render();
   }
 
   function openPreset(presetId) {
+    const returnTo = (ui.dialog && ui.dialog.returnTo) || null;
     if (presetId === "custom") {
-      blankMedicine({});
+      blankMedicine({ returnTo });
       return;
     }
     const preset = PainLog.PRESETS.find((item) => item.id === presetId);
@@ -1139,13 +1444,15 @@
       parts: presetParts(preset).map(partFromPreset),
       doseWords: preset.doseWords,
       intervalHours: preset.intervalHours,
-      asNeeded: preset.asNeeded
+      asNeeded: preset.asNeeded,
+      returnTo
     });
   }
 
   function openEditMedicine(id) {
     const med = medicineById(id);
     if (!med) return;
+    const returnTo = ui.dialog && ui.dialog.type === "log-usage" ? usageReturn(id) : (ui.dialog && ui.dialog.returnTo) || null;
     ui.dialog = {
       type: "medicine",
       stage: "form",
@@ -1156,7 +1463,8 @@
       intervalHours: med.intervalHours,
       asNeeded: med.asNeeded,
       focusPartKey: "",
-      errors: []
+      errors: [],
+      returnTo
     };
     render();
   }
@@ -1181,7 +1489,7 @@
     return { units, partAmounts };
   }
 
-  function openDose(medicineId, dose) {
+  function openDose(medicineId, dose, returnTo) {
     const med = medicineById(medicineId);
     if (!dose && (!med || !med.active)) return;
     const now = new Date();
@@ -1217,6 +1525,7 @@
           note: "",
           errors: []
         };
+    ui.dialog.returnTo = returnTo || null;
     render();
   }
 
@@ -1358,13 +1667,14 @@
       asNeeded: !!dialog.asNeeded,
       active: true
     };
+    const savedId = dialog.medicineId || uid();
     if (dialog.medicineId) {
       const med = medicineById(dialog.medicineId);
       Object.assign(med, record);
     } else {
-      state.medicines.push({ id: uid(), ...record });
+      state.medicines.push({ id: savedId, ...record });
     }
-    ui.dialog = null;
+    ui.dialog = dialog.returnTo && dialog.returnTo.type === "log-usage" ? usageReturn(savedId) : null;
     if (persist()) toast("Medicine saved.");
     render();
   }
@@ -1421,6 +1731,11 @@
       render();
       return;
     }
+    if (action === "log-usage") {
+      ui.dialog = usageReturn("");
+      render();
+      return;
+    }
     if (action === "add-medicine") {
       openAdd();
       return;
@@ -1434,7 +1749,8 @@
       return;
     }
     if (action === "log-dose") {
-      openDose(button.dataset.id, null);
+      const returnTo = ui.dialog && ui.dialog.type === "log-usage" ? usageReturn(button.dataset.id) : null;
+      openDose(button.dataset.id, null, returnTo);
       return;
     }
     if (action === "edit-dose") {
@@ -1459,13 +1775,15 @@
     if (action === "retire-medicine") {
       const med = medicineById(button.dataset.id);
       if (!med) return;
+      const returnTo = (ui.dialog && ui.dialog.returnTo) || null;
       askConfirm({
         kind: "retire-medicine",
         medicineId: med.id,
         danger: true,
         title: `Remove ${med.name}?`,
         body: "It leaves the list. Past doses stay in the log, and you can put it back later.",
-        confirmLabel: "Remove from list"
+        confirmLabel: "Remove from list",
+        returnTo
       });
       return;
     }
@@ -1473,6 +1791,7 @@
       const med = medicineById(button.dataset.id);
       if (!med) return;
       med.active = true;
+      if (ui.dialog && ui.dialog.type === "log-usage") ui.dialog.openId = med.id;
       if (persist()) toast(`${med.name} is back on the list.`);
       render();
       return;
@@ -1559,6 +1878,10 @@
       runConfirm();
       return;
     }
+    if (action === "share-session") {
+      shareSession();
+      return;
+    }
     if (action === "download-backup") {
       download(
         `pain-medicine-log-${PainLog.localDateKey(new Date())}.json`,
@@ -1609,7 +1932,7 @@
     if (dialog.kind === "retire-medicine") {
       const med = medicineById(dialog.medicineId);
       if (med) med.active = false;
-      ui.dialog = null;
+      ui.dialog = dialog.returnTo && dialog.returnTo.type === "log-usage" ? usageReturn("") : null;
       if (persist()) toast(med ? `${med.name} removed from the list.` : "Medicine removed.");
       render();
       return;
@@ -1723,14 +2046,48 @@
         rawBackup = null;
       }
     }
+    if (persistBlocked) {
+      render();
+      wire();
+      if (sessionId) {
+        loadSharedSession().then(() => render()).catch(() => {
+          toast("Could not open that shared log. Showing the copy on this device.");
+        });
+      }
+      return;
+    }
+    if (!sessionId) {
+      const preferred = preferredSession();
+      if (preferred) {
+        goToSession(preferred);
+        return;
+      }
+    }
     render();
+    wire();
+    if (sessionId) {
+      loadSharedSession().then(() => render()).catch(() => {
+        toast("Could not open that shared log. Showing the copy on this device.");
+      });
+      return;
+    }
+    ensureSession().then((id) => goToSession(id)).catch(() => {
+      /* Share session reports this when it is used. */
+    });
+  }
+
+  function wire() {
     setInterval(() => {
       const now = Date.now();
       document.querySelectorAll("[data-rel]").forEach((el) => {
         const target = Number(el.dataset.rel);
         if (Number.isFinite(target)) el.textContent = relPhrase(target, now);
       });
+      pollSharedSession();
     }, 30000);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) pollSharedSession();
+    });
     backupInput.addEventListener("change", onBackupFile);
     app.addEventListener("click", onClick);
     app.addEventListener("keydown", onTabKey);

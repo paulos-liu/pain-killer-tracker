@@ -1,6 +1,14 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const PainLog = require("../logic.js");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+const logicModule = { exports: {} };
+vm.runInThisContext(
+  `(function (module, exports) {\n${fs.readFileSync(path.join(__dirname, "../logic.js"), "utf8")}\n})`,
+  { filename: "logic.js" }
+)(logicModule, logicModule.exports);
+const PainLog = logicModule.exports;
 
 const HOUR = 60 * 60 * 1000;
 
