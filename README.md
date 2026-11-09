@@ -1,3 +1,3 @@
 # Pain medicine log
 
-https://pain-killer-tracker.iampaulos.workers.dev
+https://pain-medicine-log.iampaulos.workers.dev
