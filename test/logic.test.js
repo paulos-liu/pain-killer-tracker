@@ -181,6 +181,27 @@ test("another product with the same ingredient can trip the interval", () => {
   assert.equal(shared.otherMedicineId, "med-cold");
 });
 
+test("today's total starts at local midnight and skips yesterday and the future", () => {
+  const state = stateWith();
+  const now = new Date(2026, 10, 8, 15, 0, 0, 0);
+  const stamp = (date) => date.toISOString();
+  const add = (id, when, mg) => ({
+    id,
+    medicineId: "med-ibu",
+    takenAt: stamp(when),
+    amountMg: mg,
+    parts: [{ ingredientId: "ing-ibu", amountMg: mg }]
+  });
+  state.doses = [
+    add("yesterday", new Date(2026, 10, 7, 23, 30, 0, 0), 200),
+    add("midnight", new Date(2026, 10, 8, 0, 0, 0, 0), 200),
+    add("morning", new Date(2026, 10, 8, 8, 0, 0, 0), 400),
+    add("future", new Date(2026, 10, 8, 18, 0, 0, 0), 200)
+  ];
+  assert.equal(PainLog.ingredientDay(state, "ing-ibu", now).used, 600);
+  assert.equal(PainLog.ingredientWindow(state, "ing-ibu", now).used, 800);
+});
+
 test("the current 24-hour window ignores an older dose and a future dose", () => {
   const state = stateWith();
   const now = new Date(48 * HOUR);

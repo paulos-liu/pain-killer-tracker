@@ -23,10 +23,16 @@
     { id: "custom", label: "Custom" }
   ];
 
+  const TABS = [
+    { id: "medicines", label: "Medicines" },
+    { id: "log", label: "Log" }
+  ];
+
   const ui = {
     range: "today",
     rangeFrom: "",
     rangeTo: "",
+    tab: "medicines",
     dialog: null
   };
 
@@ -290,34 +296,38 @@
     return used;
   }
 
-  function pctBlock(ingredient, now, showLabel) {
-    const window = PainLog.ingredientWindow(state, ingredient.id, now);
-    const tone = toneFor(window.used, window.max);
-    const ratio = window.max > 0 ? (window.used / window.max) * 100 : 0;
+  function pctBlock(ingredient, reading, showLabel, periodLabel) {
+    const tone = toneFor(reading.used, reading.max);
+    const ratio = reading.max > 0 ? (reading.used / reading.max) * 100 : 0;
     const width = Math.max(0, Math.min(100, ratio));
-    const pct = formatPct(window.used, window.max);
+    const pct = formatPct(reading.used, reading.max);
     return `<div class="pct-line">
       <div class="pct-head">
         ${showLabel ? `<p class="meter-label">${esc(ingredient.name)}</p>` : `<span class="sr">${esc(ingredient.name)}</span>`}
         <span class="pct tone-${tone}">${esc(pct)}</span>
       </div>
-      <div class="meter tone-${tone}" role="meter" aria-valuemin="0" aria-valuemax="${esc(window.max)}" aria-valuenow="${esc(window.used)}" aria-label="${esc(ingredient.name)}, ${esc(pct)} of the daily max in the last 24 hours">
+      <div class="meter tone-${tone}" role="meter" aria-valuemin="0" aria-valuemax="${esc(reading.max)}" aria-valuenow="${esc(reading.used)}" aria-label="${esc(ingredient.name)}, ${esc(pct)} of the daily max ${esc(periodLabel)}">
         <span style="width:${width}%"></span>
       </div>
-      <p class="pct-sub">${esc(mgLine(window))}</p>
+      <p class="pct-sub">${esc(mgLine(reading))}</p>
     </div>`;
   }
 
-  function medicineRow(med, now) {
+  function usageBars(med, read, periodLabel) {
     const parts = PainLog.medicineParts(med);
-    const bars = parts
+    return parts
       .map((part) => {
         const ingredient = ingredientById(part.ingredientId);
         if (!ingredient) return "";
         const showLabel = parts.length > 1 || PainLog.normName(med.name) !== PainLog.normName(ingredient.name);
-        return pctBlock(ingredient, now, showLabel);
+        return pctBlock(ingredient, read(ingredient.id), showLabel, periodLabel);
       })
       .join("");
+  }
+
+  function medicineRow(med, now) {
+    const todayBars = usageBars(med, (id) => PainLog.ingredientDay(state, id, now), "since midnight");
+    const rollingBars = usageBars(med, (id) => PainLog.ingredientWindow(state, id, now), "in the last 24 hours");
     const timing = PainLog.medicineTiming(state, med, now);
     let next = "No interval set.";
     if (med.intervalHours > 0 && timing.lastAt === null) next = "No doses logged yet.";
@@ -333,7 +343,8 @@
         ${shared ? `<p class="share">${esc(shared)}</p>` : ""}
         <p class="next">${next}</p>
       </td>
-      <td data-label="Last 24 hours"><div class="pct-stack">${bars}</div></td>
+      <td data-label="Today"><div class="pct-stack"><p class="pct-caption">Today</p>${todayBars}</div></td>
+      <td data-label="Last 24 hours"><div class="pct-stack"><p class="pct-caption">Last 24 hours</p>${rollingBars}</div></td>
       <td class="actions" data-label="">
         <div class="row-actions">
           <button type="button" class="btn btn-primary" data-action="log-dose" data-id="${esc(med.id)}" data-focus-key="log-${esc(med.id)}">Log<span class="sr"> a dose of ${esc(med.name)}</span></button>
@@ -371,12 +382,12 @@
     }
     return `<section>
       <div class="section-head">
-        <h2>Last 24 hours</h2>
+        <h2>Usage</h2>
       </div>
       <div class="table-wrap">
         <table class="meds">
-          <caption class="sr">Percent of each daily max used in the last 24 hours</caption>
-          <thead><tr><th scope="col">Medicine</th><th scope="col">Last 24 hours</th><th scope="col"><span class="sr">Actions</span></th></tr></thead>
+          <caption class="sr">Percent of each daily max used since midnight, and in the last 24 hours</caption>
+          <thead><tr><th scope="col">Medicine</th><th scope="col">Today</th><th scope="col">Last 24 hours</th><th scope="col"><span class="sr">Actions</span></th></tr></thead>
           <tbody>${active.map((med) => medicineRow(med, now)).join("")}</tbody>
         </table>
       </div>
@@ -893,9 +904,18 @@
     </div>`;
   }
 
+  function tabBar() {
+    const buttons = TABS.map((item) => {
+      const selected = ui.tab === item.id;
+      return `<button type="button" class="tab" role="tab" id="tab-${item.id}" aria-controls="panel-${item.id}" aria-selected="${selected}" tabindex="${selected ? "0" : "-1"}" data-action="set-tab" data-tab="${item.id}" data-focus-key="tab-${item.id}">${item.label}</button>`;
+    }).join("");
+    return `<div class="tabs" role="tablist" aria-label="Sections">${buttons}</div>`;
+  }
+
   function view() {
     if (persistBlocked) return corruptView();
     const now = new Date();
+    const tab = ui.tab === "log" ? "log" : "medicines";
     return `<div class="wrap">
       <header class="top">
         <p class="eyebrow">On this device</p>
@@ -904,8 +924,10 @@
       <aside class="safety">
         <p><strong>Call 911</strong> if breathing slows or stops, or if the person cannot be woken.</p>
       </aside>
-      ${cardsSection(now)}
-      ${logSection(now)}
+      ${tabBar()}
+      <div role="tabpanel" id="panel-${tab}" aria-labelledby="tab-${tab}">
+        ${tab === "log" ? logSection(now) : cardsSection(now)}
+      </div>
       <footer>
         <p>Saved in this browser. Not medical advice.</p>
         <div class="footer-actions no-print">
@@ -1360,10 +1382,35 @@
     render();
   }
 
+  function onTabKey(event) {
+    const current = event.target.closest && event.target.closest("[role=tab]");
+    if (!current || !app.contains(current)) return;
+    const index = TABS.findIndex((item) => item.id === current.dataset.tab);
+    if (index < 0) return;
+    let nextIndex = null;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") nextIndex = (index + 1) % TABS.length;
+    else if (event.key === "ArrowLeft" || event.key === "ArrowUp") nextIndex = (index - 1 + TABS.length) % TABS.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = TABS.length - 1;
+    else return;
+    event.preventDefault();
+    ui.tab = TABS[nextIndex].id;
+    current.blur();
+    render();
+    const selected = app.querySelector(`[data-tab="${ui.tab}"]`);
+    if (selected) selected.focus();
+  }
+
   function onClick(event) {
     const button = event.target.closest("[data-action]");
     if (!button || button.disabled) return;
     const action = button.dataset.action;
+    if (action === "set-tab") {
+      const next = button.dataset.tab;
+      if (TABS.some((item) => item.id === next)) ui.tab = next;
+      render();
+      return;
+    }
     if (action === "set-range") {
       ui.range = button.dataset.range || "today";
       if (ui.range === "custom") {
@@ -1542,6 +1589,8 @@
       rawBackup = null;
       state = PainLog.emptyState();
       ui.dialog = null;
+      ui.tab = "medicines";
+      ui.range = "today";
       render();
       toast("Started a new log on this device.");
     }
@@ -1684,6 +1733,7 @@
     }, 30000);
     backupInput.addEventListener("change", onBackupFile);
     app.addEventListener("click", onClick);
+    app.addEventListener("keydown", onTabKey);
     app.addEventListener("submit", onSubmit);
     app.addEventListener("input", onInput);
     app.addEventListener("change", onChange);

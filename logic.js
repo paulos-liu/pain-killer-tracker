@@ -407,6 +407,24 @@
     return { used, max, remaining: max - used };
   }
 
+  function daySum(events, now) {
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const nowMs = now.getTime();
+    let sum = 0;
+    for (const event of events) {
+      if (event.t >= start && event.t <= nowMs) sum += event.mg;
+    }
+    return sum;
+  }
+
+  function ingredientDay(state, ingredientId, now) {
+    const events = ingredientEvents(state, ingredientId, null);
+    const ingredient = state.ingredients.find((item) => item.id === ingredientId);
+    const max = ingredient ? ingredient.maxPer24hMg : 0;
+    const used = daySum(events, now);
+    return { used, max, remaining: max - used };
+  }
+
   function medicineTiming(state, medicine, now) {
     const nowMs = now.getTime();
     let lastAt = null;
@@ -604,6 +622,7 @@
     medicineParts,
     peakMg,
     ingredientWindow,
+    ingredientDay,
     medicineTiming,
     assessDose,
     dosesOnDay,
